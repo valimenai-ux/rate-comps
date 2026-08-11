@@ -3,12 +3,21 @@
  * RCExports - all exports run client-side and offline.
  *
  * Images go through Plotly.downloadImage (labels/divider are annotations, so
- * they are part of the exported figure). Excel goes through the bundled
- * xlsx-js-style build (styled cells; that fork has no freeze-pane support,
- * so headers are bold + shaded instead).
+ * they are part of the exported figure). Excel goes through the vendored
+ * ExcelJS bundle: real frozen header row, styled header cells, mmm-yy dates,
+ * 0.00 numerics, sized columns, and a README sheet that states exactly what
+ * was (and was not) exported.
+ *
+ * buildWorkbook() is pure (no DOM, no download) so the Node test harness can
+ * generate a workbook and the test suite can inspect the resulting XML.
  */
 var RCExports = (function () {
-  function stamp() { return new Date().toISOString().slice(0, 10); }
+  function stamp() {
+    // Local date, not UTC: an evening export must not be dated "tomorrow".
+    var d = new Date();
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+  }
 
   function exportChart(gd, rateDisplay, format, state) {
     return Plotly.downloadImage(gd, {
@@ -37,27 +46,27 @@ var RCExports = (function () {
   // Excel
   // ------------------------------------------------------------------
 
-  var HEADER_STYLE = {
-    font: { bold: true, sz: 11 },
-    fill: { patternType: "solid", fgColor: { rgb: "F2F2F2" } },
-    border: { bottom: { style: "thin", color: { rgb: "808080" } } },
-    alignment: { horizontal: "right" }
-  };
-  var HEADER_STYLE_LEFT = {
-    font: { bold: true, sz: 11 },
-    fill: { patternType: "solid", fgColor: { rgb: "F2F2F2" } },
-    border: { bottom: { style: "thin", color: { rgb: "808080" } } },
-    alignment: { horizontal: "left" }
-  };
+  var HEADER_FONT = { bold: true, size: 11 };
+  var HEADER_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
+  var HEADER_BORDER = { bottom: { style: "thin", color: { argb: "FF808080" } } };
+
+  function styleHeaderCell(cell, horizontal) {
+    cell.font = HEADER_FONT;
+    cell.fill = HEADER_FILL;
+    cell.border = HEADER_BORDER;
+    cell.alignment = { horizontal: horizontal };
+  }
 
   function isoToExcelDate(iso) {
-    // Local noon avoids day-shift from timezone conversion inside the writer.
-    return new Date(
+    // ExcelJS converts dates to serials with pure UTC math, so UTC midnight
+    // yields an exact integer serial in every timezone. Integers matter:
+    // a fractional serial (a hidden 12:00:00) breaks MATCH/VLOOKUP/EOMONTH
+    // joins against real month-end dates and shows up in pivot tables.
+    return new Date(Date.UTC(
       parseInt(iso.slice(0, 4), 10),
       parseInt(iso.slice(5, 7), 10) - 1,
-      parseInt(iso.slice(8, 10), 10),
-      12, 0, 0
-    );
+      parseInt(iso.slice(8, 10), 10)
+    ));
   }
 
   function sheetNameFor(displayName, used) {
@@ -75,22 +84,28 @@ var RCExports = (function () {
     return candidate;
   }
 
-  function setCell(ws, r, c, cell) {
-    ws[XLSX.utils.encode_cell({ r: r, c: c })] = cell;
+  function cutoffFiltered(series, cutoff) {
+    // The workbook mirrors the charts: actual history ends at the cutoff.
+    if (!series) { return null; }
+    var out = { dates: [], values: [] };
+    series.dates.forEach(function (d, i) {
+      if (d <= cutoff) { out.dates.push(d); out.values.push(series.values[i]); }
+    });
+    return out.dates.length ? out : null;
   }
 
-  function finishSheet(ws, rows, cols) {
-    ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows - 1, c: cols - 1 } });
-  }
-
-  function rateSheet(rateKey, rateDisplay, state, payload) {
-    var columns = [{ header: "Actuals", series: payload.actuals.series[rateKey] || null }];
+  function fillRateSheet(ws, rateKey, state, payload) {
+    var columns = [{
+      header: "Actuals",
+      series: cutoffFiltered(payload.actuals.series[rateKey] || null, state.cutoff)
+    }];
     var byName = {};
     payload.forecasts.forEach(function (f) { byName[f.name] = f; });
     state.forecasts.forEach(function (f) {
       if (!f.enabled) { return; }
       var fc = byName[f.name];
-      columns.push({ header: f.displayName, series: fc && fc.series[rateKey] ? fc.series[rateKey] : null });
+      if (!fc || !fc.series[rateKey]) { return; } // no data for this rate
+      columns.push({ header: f.displayName, series: fc.series[rateKey] });
     });
 
     var monthSet = {};
@@ -102,16 +117,20 @@ var RCExports = (function () {
     });
     var months = Object.keys(monthSet).sort();
 
-    var ws = {};
-    setCell(ws, 0, 0, { v: "Date", t: "s", s: HEADER_STYLE_LEFT });
+    var head = ws.getCell(1, 1);
+    head.value = "Date";
+    styleHeaderCell(head, "left");
     columns.forEach(function (col, c) {
-      setCell(ws, 0, c + 1, { v: col.header, t: "s", s: HEADER_STYLE });
+      var cell = ws.getCell(1, c + 2);
+      cell.value = col.header;
+      styleHeaderCell(cell, "right");
     });
+
     months.forEach(function (iso, r) {
-      setCell(ws, r + 1, 0, {
-        v: isoToExcelDate(iso), t: "d",
-        s: { numFmt: "mmm-yy", alignment: { horizontal: "left" } }
-      });
+      var dateCell = ws.getCell(r + 2, 1);
+      dateCell.value = isoToExcelDate(iso);
+      dateCell.numFmt = "mmm-yy";
+      dateCell.alignment = { horizontal: "left" };
       columns.forEach(function (col, c) {
         var v = null;
         if (col.series) {
@@ -119,60 +138,104 @@ var RCExports = (function () {
           if (idx >= 0) { v = col.series.values[idx]; }
         }
         if (v !== null && v !== undefined) {
-          setCell(ws, r + 1, c + 1, { v: v, t: "n", s: { numFmt: "0.00" } });
+          var cell = ws.getCell(r + 2, c + 2);
+          cell.value = v;
+          cell.numFmt = "0.00";
         }
       });
     });
-    finishSheet(ws, months.length + 1, columns.length + 1);
-    ws["!cols"] = [{ wch: 10 }].concat(columns.map(function (col) {
-      return { wch: Math.max(12, col.header.length + 2) };
-    }));
-    return ws;
+
+    ws.getColumn(1).width = 10;
+    columns.forEach(function (col, c) {
+      ws.getColumn(c + 2).width = Math.max(12, col.header.length + 2);
+    });
   }
 
-  function readmeSheet(state, payload, sheetNames) {
-    var bold = { font: { bold: true, sz: 11 } };
-    var title = { font: { bold: true, sz: 13 } };
+  function fillReadmeSheet(ws, state, payload, sheetNames) {
     var rows = [];
-    rows.push([{ v: "Rate Comps - data export", t: "s", s: title }]);
-    rows.push([]);
-    rows.push([{ v: "Source folder", t: "s", s: bold }, { v: payload.meta.data_folder, t: "s" }]);
-    rows.push([{ v: "Actual / Forecast cutoff", t: "s", s: bold }, { v: RCCharts.fmtMonthLong(state.cutoff), t: "s" }]);
-    rows.push([{ v: "Dashboard generated", t: "s", s: bold }, { v: payload.meta.generated_at, t: "s" }]);
-    rows.push([{ v: "Workbook exported", t: "s", s: bold }, { v: new Date().toLocaleString(), t: "s" }]);
+    function push(label, value) { rows.push([label, value]); }
+    push("Rate Comps - data export", null);
+    push(null, null);
+    push("Source folder", payload.meta.data_folder);
+    push("Actual / Forecast cutoff", RCCharts.fmtMonthLong(state.cutoff));
+    push("Dashboard generated", payload.meta.generated_at);
+    push("Workbook exported", new Date().toLocaleString());
     var primary = RCCharts.effectivePrimary(state);
     var primaryDisplay = "";
     state.forecasts.forEach(function (f) { if (f.name === primary) { primaryDisplay = f.displayName; } });
-    rows.push([{ v: "Primary forecast", t: "s", s: bold }, { v: primaryDisplay || "(none)", t: "s" }]);
-    rows.push([]);
-    rows.push([{ v: "Sheets", t: "s", s: bold }, { v: sheetNames.join(", "), t: "s" }]);
-    rows.push([{ v: "Values", t: "s", s: bold }, { v: "Rates in percent, shown to 2 decimals. Blank cells mean the source file has no value for that month.", t: "s" }]);
+    push("Primary forecast", primaryDisplay || "(none)");
+    push(null, null);
+    push("Sheets", sheetNames.join(", "));
+    push("Values", "Rates in percent, shown to 2 decimals. Blank cells mean the source file has no value for that month.");
+    push("Scope", "This workbook contains only what the dashboard currently shows: rates hidden by the configuration and forecasts toggled off are NOT included. The Actuals column ends at the cutoff month above; forecast columns carry each file's full span.");
+    var disabled = state.forecasts.filter(function (f) { return !f.enabled; })
+      .map(function (f) { return f.displayName; });
+    push("Forecasts excluded (toggled off)", disabled.length ? disabled.join(", ") : "(none)");
+    var hidden = (payload.defaults.hidden_rates || []).slice();
+    push("Rates excluded (hidden by config)", hidden.length ? hidden.join(", ") : "(none)");
 
-    var ws = {};
     rows.forEach(function (row, r) {
-      row.forEach(function (cell, c) { setCell(ws, r, c, cell); });
+      if (row[0] !== null) {
+        var label = ws.getCell(r + 1, 1);
+        label.value = row[0];
+        label.font = r === 0 ? { bold: true, size: 13 } : { bold: true, size: 11 };
+      }
+      if (row[1] !== null && row[1] !== undefined) {
+        ws.getCell(r + 1, 2).value = row[1];
+        ws.getCell(r + 1, 2).alignment = { wrapText: false };
+      }
     });
-    finishSheet(ws, rows.length, 2);
-    ws["!cols"] = [{ wch: 26 }, { wch: 80 }];
-    return ws;
+    ws.getColumn(1).width = 32;
+    ws.getColumn(2).width = 90;
   }
 
-  function exportExcel(state, payload, rates) {
-    var wb = XLSX.utils.book_new();
+  /** Pure workbook construction - shared by the browser and the Node tests. */
+  function buildWorkbook(state, payload, rates) {
+    var wb = new ExcelJS.Workbook();
+    wb.creator = "Rate Comps";
     var used = {};
     var sheetNames = [];
+    var pending = [];
     rates.forEach(function (rate) {
       var name = sheetNameFor(rate.display_name, used);
       sheetNames.push(name);
-      XLSX.utils.book_append_sheet(wb, rateSheet(rate.key, rate.display_name, state, payload), name);
+      pending.push({ name: name, key: rate.key });
     });
-    XLSX.utils.book_append_sheet(wb, readmeSheet(state, payload, sheetNames), sheetNameFor("README", used));
-    XLSX.writeFile(wb, "RateComps_Data_" + stamp() + ".xlsx");
+    pending.forEach(function (p) {
+      var ws = wb.addWorksheet(p.name, {
+        views: [{ state: "frozen", ySplit: 1 }]  // real frozen header row
+      });
+      fillRateSheet(ws, p.key, state, payload);
+    });
+    var readme = wb.addWorksheet(sheetNameFor("README", used));
+    fillReadmeSheet(readme, state, payload, sheetNames);
+    return wb;
+  }
+
+  function exportExcel(state, payload, rates) {
+    var wb = buildWorkbook(state, payload, rates);
+    return wb.xlsx.writeBuffer().then(function (buffer) {
+      var blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "RateComps_Data_" + stamp() + ".xlsx";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    });
   }
 
   return {
     exportChart: exportChart,
     exportAll: exportAll,
-    exportExcel: exportExcel
+    exportExcel: exportExcel,
+    buildWorkbook: buildWorkbook
   };
 })();
+
+/* Node export used only by the automated test harness. */
+if (typeof module !== "undefined" && module.exports) { module.exports = RCExports; }

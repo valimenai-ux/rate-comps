@@ -164,3 +164,103 @@ def test_blank_cells_break_series_but_keep_rows(write_csv, tmp_path: Path) -> No
     gaps = dashboard.forecasts[0].table.series
     assert gaps["fed_funds"].values == [3.2, None]
     assert gaps["sofr"].values == [None, 3.1]
+
+
+def test_rows_with_extra_fields_are_skipped_and_reported(write_csv, tmp_path: Path) -> None:
+    write_csv("actuals.csv", ACTUALS)
+    write_csv(
+        "Ragged.csv",
+        "date,fed_funds\n2026-04-30,3.2\n2026-05-31,3.1,9.9\n2026-06-30,3.0\n",
+    )
+    dashboard, report = _load(tmp_path, AppConfig(data_folder=str(tmp_path)))
+    series = dashboard.forecasts[0].table.series["fed_funds"]
+    # The misaligned row is gone - but never silently.
+    assert series.dates == ["2026-04-30", "2026-06-30"]
+    assert "1 row(s) skipped - more fields than the header" in _warnings(report)
+    assert "line 3" in _warnings(report)
+
+
+def test_trailing_empty_fields_are_trimmed_without_complaint(write_csv, tmp_path: Path) -> None:
+    write_csv("actuals.csv", ACTUALS)
+    write_csv("Trail.csv", "date,fed_funds\n2026-04-30,3.2,\n2026-05-31,3.1,,\n")
+    dashboard, report = _load(tmp_path, AppConfig(data_folder=str(tmp_path)))
+    series = dashboard.forecasts[0].table.series["fed_funds"]
+    assert series.values == [3.2, 3.1]  # Excel's trailing commas lose nothing
+    assert "more fields" not in _warnings(report)
+
+
+def test_short_rows_are_padded_and_reported(write_csv, tmp_path: Path) -> None:
+    write_csv("actuals.csv", ACTUALS)
+    write_csv("Short.csv", "date,fed_funds,sofr\n2026-04-30,3.2\n2026-05-31,3.1,3.0\n")
+    dashboard, report = _load(tmp_path, AppConfig(data_folder=str(tmp_path)))
+    series = dashboard.forecasts[0].table.series
+    assert series["fed_funds"].values == [3.2, 3.1]
+    assert series["sofr"].values == [None, 3.0]
+    assert "1 row(s) had fewer fields than the header" in _warnings(report)
+
+
+def test_nan_and_inf_text_become_blanks_and_payload_stays_valid_json(
+    write_csv, tmp_path: Path
+) -> None:
+    import json
+
+    write_csv("actuals.csv", ACTUALS)
+    write_csv("Weird.csv", "date,fed_funds\n2026-04-30,NaN\n2026-05-31,inf\n2026-06-30,3.0\n")
+    dashboard, report = _load(tmp_path, AppConfig(data_folder=str(tmp_path)))
+    series = dashboard.forecasts[0].table.series["fed_funds"]
+    assert series.values == [None, None, 3.0]
+    assert "2 non-numeric value(s) treated as blanks" in _warnings(report)
+    # The whole payload must serialize as strict JSON (a bare NaN would make
+    # JSON.parse throw and blank the entire dashboard).
+    json.dumps(dashboard.to_payload(), allow_nan=False)
+
+
+def test_exact_duplicate_headers_keep_first_and_warn(write_csv, tmp_path: Path) -> None:
+    write_csv("actuals.csv", ACTUALS)
+    write_csv("Dup.csv", "date,fed_funds,fed_funds\n2026-04-30,3.2,9.9\n")
+    dashboard, report = _load(tmp_path, AppConfig(data_folder=str(tmp_path)))
+    table = dashboard.forecasts[0].table
+    assert table.rate_keys == ["fed_funds"]
+    assert table.series["fed_funds"].values == [3.2]  # first column wins
+    assert "same rate after normalization" in _warnings(report)
+
+
+def test_interior_gaps_are_disclosed(write_csv, tmp_path: Path) -> None:
+    write_csv("actuals.csv", ACTUALS)
+    write_csv("Gappy.csv", "date,fed_funds\n2026-04-30,3.2\n2026-05-31,\n2026-06-30,3.0\n")
+    _, report = _load(tmp_path, AppConfig(data_folder=str(tmp_path)))
+    infos = "\n".join(m.message for m in report.messages if m.level == "info")
+    assert "1 month(s) inside the series have no value" in infos
+
+
+def test_decimal_commas_and_thousands_separators(write_csv, tmp_path: Path) -> None:
+    write_csv("actuals.csv", ACTUALS)
+    write_csv(
+        "Euro.csv",
+        'date,fed_funds\n2026-04-30,"3,64"\n2026-05-31,"1,234.5"\n2026-06-30,"12,34,56"\n',
+    )
+    dashboard, report = _load(tmp_path, AppConfig(data_folder=str(tmp_path)))
+    series = dashboard.forecasts[0].table.series["fed_funds"]
+    # "3,64" is a European decimal comma (NOT 364); "1,234.5" is thousands;
+    # "12,34,56" is ambiguous and becomes a reported blank.
+    assert series.values == [3.64, 1234.5, None]
+    assert "non-numeric value(s) treated as blanks" in _warnings(report)
+
+
+def test_excel_lock_files_and_uppercase_extensions(write_csv, tmp_path: Path) -> None:
+    write_csv("actuals.csv", ACTUALS)
+    write_csv("~$Plan.csv", "\x00\x01garbage")  # Excel owner file, not data
+    write_csv("UPPER.CSV", "date,fed_funds\n2026-04-30,3.2\n")
+    dashboard, report = _load(tmp_path, AppConfig(data_folder=str(tmp_path)))
+    names = [f.name for f in dashboard.forecasts]
+    assert names == ["UPPER"]  # .CSV loads; ~$ file is invisible
+    assert "~$Plan" not in "\n".join(m.source for m in report.messages)
+
+
+def test_cutoff_outside_actuals_range_warns(write_csv, tmp_path: Path) -> None:
+    write_csv("actuals.csv", ACTUALS)
+    write_csv("F.csv", "date,fed_funds\n2026-04-30,3.0\n")
+    config = AppConfig(data_folder=str(tmp_path))
+    config.cutoff_date = "2030-01-31"
+    _, report = _load(tmp_path, config)
+    assert "outside the actuals range" in _warnings(report)

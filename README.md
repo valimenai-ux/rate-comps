@@ -36,8 +36,10 @@ house style:
 - Black divider with diamond caps at the actual/forecast boundary, with
   "Actual" / "Forecast" captions.
 - White-filled circle markers and 2-decimal value labels at the configured
-  label dates, plus a label at every line end. Labels **never overlap** —
-  a deterministic collision engine spreads them after every re-render.
+  label dates, plus a label at every line end. Value labels **never overlap
+  each other** — a deterministic collision engine spreads them after every
+  re-render (clamped to the plot area; the divider captions are positioned
+  separately).
 - Fiscal-quarter ticks ("Oct-25"), hidden y-axis, no gridlines.
 - Hover shows all series for a month; drag to zoom; double-click to reset.
 
@@ -47,7 +49,9 @@ y-axis show/auto/manual per chart, tick anchor/interval, chart size presets.
 
 **Exports** (all offline, from the toolbar or per chart): PNG (~300 dpi) and
 SVG per chart, "Export all charts", and "Export data to Excel" — one
-formatted sheet per rate plus a README sheet.
+formatted sheet per rate (frozen header row, mmm-yy dates, 2-decimal
+numbers) plus a README sheet that records the cutoff, the primary forecast,
+and exactly which hidden rates / disabled forecasts were left out.
 
 **Keep your changes:** the sidebar is temporary until you click
 **Download config.yaml** and drop the downloaded file over
@@ -83,8 +87,13 @@ date,fed_funds,sofr,ust_10yr
 ```
 
 - **Dates** are monthly. `YYYY-MM-DD`, `M/D/YYYY`, and `Mon-YY` all work and
-  are normalized to month-end. Duplicate months keep the last row (with a
-  warning).
+  are normalized to month-end. Two-digit years follow Excel's rule: `00-29`
+  mean 20xx, `30-99` mean 19xx (write 4-digit years for anything unusual).
+  Duplicate months keep the last row in file order (with a warning).
+- **Numbers**: plain decimals, with or without `%`. `1,234.5`-style thousands
+  separators and European decimal commas (`3,64`) are both understood;
+  anything ambiguous becomes a blank and is counted in the validation panel.
+  Excel lock files (`~$…csv`) are ignored; `.CSV`/`.csv` both load.
 - **Rates** are matched across files case-insensitively with
   whitespace/underscore normalization (`Fed Funds` = `fed_funds`). Any new
   rate column in any file automatically gets its own chart. Chart order =
@@ -93,9 +102,19 @@ date,fed_funds,sofr,ust_10yr
 - **Mismatched spans are normal.** Forecasts may start/end anywhere; each
   line plots only where it has data. Forecast files may include their own
   pre-cutoff history — it is drawn exactly as provided, never clipped.
+- **Blank cells** inside a series do not sever the chart line (a month-end
+  rate series is a sampling of a continuous rate, so the line bridges the
+  gap) — but no marker or value label is ever drawn at a blank month, the
+  Excel export leaves the cell empty, and the validation panel reports every
+  interior gap. Deliberate design decision; see AUDIT.md P2-3.
+- **Malformed rows never vanish silently.** A row with *more* fields than
+  the header is skipped (the values could not be matched to columns) and a
+  row with *fewer* is padded with blanks — both counted and reported in the
+  validation panel. Purely trailing commas are trimmed quietly.
 - Up to **6 forecasts**. Config-listed files load first (in config order),
-  then any extra CSVs found in the folder (alphabetically, with the reserved
-  colors `#2E8B8B`, `#7A5FA8`); beyond 6 are skipped with a warning.
+  then any extra CSVs found in the folder (alphabetically, taking unused
+  colors from a reserved palette that starts `#2E8B8B`, `#7A5FA8`); beyond 6
+  are skipped with a warning.
 - A broken file never kills the build: it is skipped with a clear message in
   the validation panel and everything valid still renders.
 
@@ -156,8 +175,15 @@ cd rate_comps
 py RateComps.py
 ```
 
-For production, edit `data_folder` in `config.yaml` to the shared drive,
-e.g. `C:\Treasury\RateComps_Data`.
+For production, edit `data_folder` in `config.yaml` to the shared drive.
+Write the Windows path **plain or in single quotes** — never in double
+quotes, where `\T` etc. are read as escape codes and the file fails to load:
+
+```yaml
+data_folder: C:\Treasury\RateComps_Data      # fine
+data_folder: 'C:\Treasury\RateComps_Data'    # fine
+data_folder: "C:\Treasury\RateComps_Data"    # BREAKS
+```
 
 ### Power users
 
@@ -196,35 +222,55 @@ that `RateComps.py` creates, or `pip install -r requirements.txt`.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
-pytest                    # loader / dates / config / build / label-engine tests
+pytest                    # loader / dates / config / build / label / Excel / YAML tests
 mypy                      # strict, python_version = 3.9
 ```
+
+Node is **optional and used only by tests**: when `node` is on the PATH,
+pytest additionally runs the label-engine property harness, the real
+config-emitter round-trip, and the Excel-workbook XML gate (all under
+`tests/js/`); without Node those three are skipped.
+
+**Reproducible installs:** `requirements.lock` is a `pip freeze` of a known
+-good venv (its header records the Python it was frozen with).
+`RateComps.py` installs from the lock when the running Python's major.minor
+matches, and quietly falls back to the flexible `requirements.txt` ranges
+otherwise. To re-freeze after a dependency change:
+
+```bash
+.venv/bin/python -m pip freeze > requirements.lock   # then re-add the header line
+```
+
+(header line: `# frozen-with-python: 3.x` — see the current file).
 
 Layout:
 
 ```
 RateComps.py         # zero-argument bootstrap (venv setup + build + open)
 run.py               # CLI: --config, --data, --no-open, --debug
-config.yaml          # ships pre-wired for the sample data
+config.yaml          # wired to this checkout's data folder; repoint for prod
+requirements.lock    # pinned installs (preferred when the Python matches)
 src/
   loader.py          # CSV/config loading, normalization, fail-soft assembly
   validate.py        # date & rate-name normalization, report, config schema
   model.py           # typed dataclasses + JSON payload serialization
-  build_html.py      # jinja2 render, inlines plotly.js/xlsx/CSS/JS/data
+  build_html.py      # jinja2 render, inlines plotly.js/ExcelJS/CSS/JS/data
   templates/         # dashboard.html.j2
-  static/css|js      # app.js, charts.js, labels.js, exports.js, vendor/
-tests/               # pytest suite + node harness for the label engine
+  static/css|js      # app.js, charts.js, labels.js, yaml_export.js,
+                     # exports.js, vendor/
+tests/               # pytest suite + node harnesses (labels, YAML, Excel)
 data_sample/         # tiny synthetic fixtures used by the tests
 output/              # generated dashboards (gitignored)
 ```
 
 Python is mypy-strict-clean at `python_version = 3.9` (every module uses
 `from __future__ import annotations`; no 3.10+ syntax or stdlib). The label
-collision engine (`src/static/js/labels.js`) is a pure function tested via
-Node when available.
+collision engine (`labels.js`), the config emitter (`yaml_export.js`) and
+the Excel workbook builder (`exports.js`) are pure functions tested via Node
+when available.
 
-Vendored: `xlsx-js-style` 1.2.0 (Apache-2.0, license alongside the bundle).
-plotly.js is inlined from the `plotly` Python package at build time.
+Vendored: `ExcelJS` 4.4.0 (MIT, license alongside the bundle). plotly.js is
+inlined from the `plotly` Python package at build time.
 
 ---
 
@@ -254,9 +300,11 @@ plotly.js is inlined from the `plotly` Python package at build time.
 7. A downloaded config writes `cutoff_date: null` whenever the chosen
    cutoff equals the last actuals month, preserving the follow-the-actuals
    behavior for the monthly refresh.
-8. **Excel freeze panes** are not supported by the bundled `xlsx-js-style`
-   writer, so headers are bold + shaded instead; number formats, column
-   widths and the README sheet work as specified.
+8. **Excel export** uses the vendored ExcelJS writer: the header row is
+   bold + shaded **and frozen** (freeze panes), dates are `mmm-yy`, numbers
+   `0.00`, columns sized. Only what the dashboard currently shows is
+   exported; the README sheet names any hidden rates / disabled forecasts
+   that were left out.
 9. Values are treated as percents and displayed with 2 decimals everywhere
    (labels, hover, Excel).
 10. If **no forecasts** are enabled/loadable, charts show the actuals line

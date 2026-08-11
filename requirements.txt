@@ -1,7 +1,8 @@
 # Rate Comps runtime dependencies (Python 3.9 or newer).
 # Ranges are deliberately loose so pip can pick versions compatible with the
-# interpreter it runs under (e.g. pandas 2.2.x on corporate Python 3.9).
-pandas>=2.0,<3
+# interpreter it runs under. When requirements.lock exists and was frozen for
+# the same Python major.minor, RateComps.py installs from the lock instead
+# (reproducible installs); these ranges are the fallback.
 PyYAML>=6.0,<7
 plotly>=5.18,<7
 Jinja2>=3.1,<4

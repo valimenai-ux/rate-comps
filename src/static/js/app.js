@@ -151,9 +151,13 @@
   // Sidebar sections
   // ------------------------------------------------------------------
 
-  function section(title, open) {
+  var sectionOpen = {}; // remembered across refreshControls() rebuilds
+
+  function section(title, openDefault) {
+    if (!(title in sectionOpen)) { sectionOpen[title] = !!openDefault; }
     var details = el("details", { class: "rc-section" });
-    if (open) { details.open = true; }
+    if (sectionOpen[title]) { details.open = true; }
+    details.addEventListener("toggle", function () { sectionOpen[title] = details.open; });
     details.appendChild(el("summary", { text: title }));
     var body = el("div", { class: "rc-section-body" });
     details.appendChild(body);
@@ -269,7 +273,12 @@
       scheduleRender();
     });
     var interval = el("select", {});
-    [1, 2, 3, 4, 6, 12].forEach(function (n) {
+    var intervalChoices = [1, 2, 3, 4, 6, 12];
+    if (intervalChoices.indexOf(state.tick.intervalMonths) < 0) {
+      intervalChoices.push(state.tick.intervalMonths); // honor any config value
+      intervalChoices.sort(function (a, b) { return a - b; });
+    }
+    intervalChoices.forEach(function (n) {
       interval.appendChild(option(String(n), n + " mo", state.tick.intervalMonths === n));
     });
     interval.addEventListener("change", function () {
@@ -450,100 +459,34 @@
   }
 
   // ------------------------------------------------------------------
-  // config.yaml export
+  // config.yaml export (the emitter itself lives in yaml_export.js so the
+  // automated round-trip test can run it under Node)
   // ------------------------------------------------------------------
 
-  function q(value) { return JSON.stringify(String(value)); }
-
-  function numOut(n) {
-    return (typeof n === "number" && isFinite(n)) ? String(n) : "null";
-  }
-
   function emitYaml() {
-    var d = payload.defaults;
-    var lines = [];
-    lines.push("# Rate Comps configuration");
-    lines.push("# Exported from the dashboard on " + new Date().toLocaleString());
-    lines.push("");
-    lines.push("data_folder: " + q(payload.meta.data_folder));
-    lines.push("output_path: " + q(payload.meta.output_path));
-    lines.push("");
-    if (state.cutoff === LAST_ACTUAL) {
-      lines.push("cutoff_date: null   # follows the last month in actuals.csv");
-    } else {
-      lines.push("cutoff_date: " + q(state.cutoff));
-    }
-    var primary = RCCharts.effectivePrimary(state);
-    var primaryDisplay = "";
-    state.forecasts.forEach(function (f) { if (f.name === primary) { primaryDisplay = f.displayName; } });
-    lines.push("primary_forecast: " + q(primaryDisplay || ""));
-    lines.push("");
-    lines.push("forecasts:");
-    state.forecasts.forEach(function (f) {
-      var parts = "  - {file: " + q(f.file) +
-        ", display_name: " + q(f.displayName) +
-        ", color: " + q(f.color) +
-        ", enabled: " + (f.enabled ? "true" : "false");
-      if (f.dash && f.dash !== "solid") { parts += ", dash: " + q(f.dash); }
-      lines.push(parts + "}");
+    // Axis overrides for rates not currently visible (hidden_rates) exist
+    // only in the file defaults; pass them through so a download never
+    // silently deletes them.
+    var extraPerRate = {};
+    Object.keys(payload.defaults.y_axis.per_rate).forEach(function (key) {
+      if (!state.yAxis.perRate[key]) {
+        extraPerRate[key] = payload.defaults.y_axis.per_rate[key];
+      }
     });
-    lines.push("");
-    lines.push("label_dates: [" + state.labelDates.map(q).join(", ") + "]");
-    lines.push("always_label_line_ends: " + (state.labelLineEnds ? "true" : "false"));
-    lines.push("");
-    var nameKeys = Object.keys(d.rate_display_names);
-    if (nameKeys.length === 0) {
-      lines.push("rate_display_names: {}");
-    } else {
-      lines.push("rate_display_names:");
-      nameKeys.forEach(function (key) {
-        lines.push("  " + q(key) + ": " + q(d.rate_display_names[key]));
-      });
-    }
-    lines.push("rate_order: [" + d.rate_order.map(q).join(", ") + "]");
-    lines.push("hidden_rates: [" + d.hidden_rates.map(q).join(", ") + "]");
-    lines.push("");
-    lines.push("tick:");
-    lines.push("  anchor_month: " + state.tick.anchorMonth);
-    lines.push("  interval_months: " + state.tick.intervalMonths);
-    lines.push("");
-    lines.push("y_axis:");
-    lines.push("  show: " + (state.yAxis.show ? "true" : "false"));
-    lines.push("  default_padding_pct: " + numOut(state.yAxis.defaultPaddingPct));
-    var overrides = [];
-    payload.rates.forEach(function (r) {
-      var a = state.yAxis.perRate[r.key];
-      if (!a) { return; }
-      var isDefault = a.auto && a.min === null && a.max === null && a.paddingPct === null;
-      if (isDefault) { return; }
-      var parts = ["auto: " + (a.auto ? "true" : "false")];
-      if (a.min !== null) { parts.push("min: " + numOut(a.min)); }
-      if (a.max !== null) { parts.push("max: " + numOut(a.max)); }
-      if (a.paddingPct !== null) { parts.push("padding_pct: " + numOut(a.paddingPct)); }
-      overrides.push("    " + q(r.key) + ": {" + parts.join(", ") + "}");
+    return RCYaml.emit(state, {
+      dataFolder: payload.meta.data_folder,
+      outputPath: payload.meta.output_path,
+      lastActual: LAST_ACTUAL,
+      // When every forecast is toggled off, keep the remembered selection
+      // instead of exporting an empty primary.
+      primaryName: RCCharts.effectivePrimary(state) || state.primary,
+      rates: payload.rates,
+      extraPerRate: extraPerRate,
+      rateDisplayNames: payload.defaults.rate_display_names,
+      rateOrder: payload.defaults.rate_order,
+      hiddenRates: payload.defaults.hidden_rates,
+      exportedAt: new Date().toLocaleString()
     });
-    if (overrides.length === 0) {
-      lines.push("  per_rate: {}");
-    } else {
-      lines.push("  per_rate:");
-      overrides.forEach(function (line) { lines.push(line); });
-    }
-    lines.push("");
-    lines.push("chart:");
-    lines.push("  width_px: " + state.chart.widthPx);
-    lines.push("  height_px: " + state.chart.heightPx);
-    lines.push("  font_family: " + q(state.chart.fontFamily));
-    lines.push("  font_sizes: {title: " + state.chart.fontSizes.title +
-      ", legend: " + state.chart.fontSizes.legend +
-      ", axis: " + state.chart.fontSizes.axis +
-      ", label: " + state.chart.fontSizes.label +
-      ", caption: " + state.chart.fontSizes.caption + "}");
-    lines.push("");
-    lines.push("export:");
-    lines.push("  png_scale: " + state.export.pngScale);
-    lines.push("  default_format: " + q(state.export.defaultFormat));
-    lines.push("");
-    return lines.join("\n");
   }
 
   function downloadText(filename, text) {
@@ -561,9 +504,18 @@
   // ------------------------------------------------------------------
 
   function saveSession() {
+    // Never overwrite a stored session with the pristine file state: the
+    // initial render must not destroy the "Restore last session" offer.
+    if (JSON.stringify(state) === FILE_STATE) { return; }
     try {
       window.localStorage.setItem(LS_KEY, JSON.stringify({ v: 1, state: state }));
     } catch (err) { /* storage may be unavailable (file://, private mode) */ }
+  }
+
+  function clearSession() {
+    try {
+      window.localStorage.removeItem(LS_KEY);
+    } catch (err) { /* ignore */ }
   }
 
   function loadSession() {
@@ -640,6 +592,7 @@
     });
     document.getElementById("rc-reset").addEventListener("click", function () {
       state = JSON.parse(FILE_STATE);
+      clearSession(); // an explicit reset also discards the stored session
       refreshControls();
       renderAll();
     });

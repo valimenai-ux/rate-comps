@@ -113,15 +113,23 @@ var RCCharts = (function () {
       var all = seriesPoints(fc.series[rateKey]);
       if (f.name === primaryName) {
         var after = all.filter(function (p) { return p.d > state.cutoff; });
-        var drawn = after;
-        if (lastActual && after.length > 0) {
-          drawn = [{ d: lastActual.d, v: lastActual.v }].concat(after);
+        // A continuation needs a real value after the cutoff - null-only
+        // post-cutoff rows must not hijack the Actuals legend entry.
+        var firstReal = null;
+        for (var j = 0; j < after.length; j++) {
+          if (after[j].v !== null && after[j].v !== undefined) { firstReal = after[j]; break; }
         }
-        if (after.length > 0) {
+        if (firstReal) {
           primaryHasContinuation = true;
           pieces.push({
             id: "fc:" + f.name, label: f.displayName, color: f.color, dash: "dash",
-            width: 3.6, points: drawn, labelPoints: after, domain: "forecast",
+            width: 3.6, points: after, labelPoints: after, domain: "forecast",
+            // The joining segment back to the last actual is a hover-silent
+            // bridge trace, so the boundary month's hover keeps attributing
+            // that value to Actuals rather than to the forecast.
+            bridge: lastActual
+              ? [{ d: lastActual.d, v: lastActual.v }, { d: firstReal.d, v: firstReal.v }]
+              : null,
             group: "primary", legendRank: 1000 + idx, showLegend: true
           });
         }
@@ -294,19 +302,23 @@ var RCCharts = (function () {
     }
 
     // --- line traces (draw order: actuals first, then config order) ---
+    // connectgaps: a month-end rate series is a sampling of a continuous
+    // rate, so an interior blank month must not visually sever the line
+    // (markers/labels still skip it, and the loader reports every gap).
     drawList.forEach(function (piece) {
       piece.traceIndex = traces.length;
       traces.push({
         type: "scatter",
         mode: "lines",
+        connectgaps: true,
         x: piece.points.map(function (p) { return p.d; }),
         y: piece.points.map(function (p) { return p.v; }),
-        name: piece.label,
+        name: escapeHtml(piece.label),
         legendgroup: piece.group,
         legendrank: piece.legendRank,
         showlegend: piece.showLegend,
         line: { color: piece.color, width: piece.width, dash: piece.dash },
-        hovertemplate: "%{y:.2f}<extra>" + piece.label + "</extra>"
+        hovertemplate: "%{y:.2f}<extra>" + escapeHtml(piece.label) + "</extra>"
       });
       if (piece.bridge) {
         traces.push({
@@ -314,7 +326,7 @@ var RCCharts = (function () {
           mode: "lines",
           x: piece.bridge.map(function (p) { return p.d; }),
           y: piece.bridge.map(function (p) { return p.v; }),
-          name: piece.label,
+          name: escapeHtml(piece.label),
           legendgroup: piece.group,
           showlegend: false,
           line: { color: piece.color, width: piece.width, dash: piece.dash },
@@ -558,13 +570,19 @@ var RCCharts = (function () {
     var config = {
       responsive: false,
       displaylogo: false,
-      modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d"],
-      doubleClick: "reset",
-      toImageButtonOptions: {
-        format: state.export.defaultFormat,
-        scale: state.export.defaultFormat === "svg" ? 1 : state.export.pngScale,
-        filename: RCExportsFileName(rateDisplay)
-      }
+      // The built-in camera bakes its filename at render time (stale date
+      // after midnight); this custom button routes through RCExports, which
+      // stamps the name at click time - one code path for every image export.
+      modeBarButtonsToRemove: ["select2d", "lasso2d", "autoScale2d", "toImage"],
+      modeBarButtonsToAdd: [{
+        name: "rc-download-image",
+        title: "Download chart (" + state.export.defaultFormat.toUpperCase() + ")",
+        icon: Plotly.Icons.camera,
+        click: function (g) {
+          RCExports.exportChart(g, rateDisplay, state.export.defaultFormat, state);
+        }
+      }],
+      doubleClick: "reset"
     };
     return Plotly.react(gd, fig.traces, fig.layout, config).then(function () {
       bindOnce(gd);
@@ -573,9 +591,12 @@ var RCCharts = (function () {
     });
   }
 
-  /** Safe file name shared with exports.js (defined before it loads). */
+  /** Safe file name shared with exports.js; local-date stamp (not UTC, so an
+   *  evening download in the Americas is not dated "tomorrow"). */
   function RCExportsFileName(name) {
-    var stamp = new Date().toISOString().slice(0, 10);
+    var d = new Date();
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    var stamp = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
     var safe = String(name).replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "_");
     return (safe || "chart") + "_" + stamp;
   }

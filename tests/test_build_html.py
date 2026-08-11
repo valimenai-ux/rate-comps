@@ -21,17 +21,25 @@ def test_build_writes_selfcontained_html(repo_root: Path, sample_folder: Path, t
     result = _build(repo_root, sample_folder, tmp_path)
     html = result.output_path.read_text(encoding="utf-8")
 
-    # Everything inlined, nothing fetched.
+    # Everything inlined, nothing fetched. The plotly bundle legitimately
+    # contains http:// inside string literals (XML namespaces); what must not
+    # exist is any *reference the browser would fetch* - src/href attributes
+    # pointing at http(s):// or protocol-relative // URLs, CSS imports, or
+    # css url(...) targets.
     assert re.search(r"<script[^>]+\bsrc\s*=", html) is None
     assert re.search(r"<link[^>]+\bhref\s*=", html) is None
+    assert re.search(r"<img[^>]+\bsrc\s*=", html) is None
+    assert re.search(r"<iframe\b", html) is None
     assert "@import" not in html
+    assert re.search(r"url\(\s*[\"']?\s*(?:https?:)?//", html) is None
 
     # The big pieces are actually present.
     assert 'id="rc-payload"' in html
     assert "RCLabels" in html
     assert "RCCharts" in html
+    assert "RCYaml" in html
     assert "RCExports" in html
-    assert "XLSX" in html
+    assert "ExcelJS" in html
     assert len(html) > 3_000_000  # plotly.js alone is ~3.5 MB
 
 

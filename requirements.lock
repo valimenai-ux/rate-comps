@@ -1,0 +1,12 @@
+# frozen-with-python: 3.14
+# Pinned runtime set (pip freeze of a clean venv built from requirements.txt).
+# RateComps.py installs from this file when the running Python's major.minor
+# matches the header above; otherwise it falls back to requirements.txt.
+# Re-freeze (and update the header) after changing requirements.txt - ideally
+# once from a corporate laptop so its Python version is the one pinned here.
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+narwhals==2.24.0
+packaging==26.3
+plotly==6.9.0
+PyYAML==6.0.3

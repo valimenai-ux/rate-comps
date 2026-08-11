@@ -8,11 +8,15 @@ raise :class:`~src.validate.ConfigError`.
 
 from __future__ import annotations
 
+import csv
 import datetime as dt
+import io
+import math
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-import pandas as pd
 import yaml
 
 from .model import (
@@ -45,6 +49,17 @@ def fmt_month(iso_date: str) -> str:
     return d.strftime("%b-%Y")
 
 
+def _decode_config_text(data: bytes) -> str:
+    """Decode config.yaml tolerantly: UTF-8 (with or without a Notepad BOM),
+    then Windows cp1252, then latin-1 (which cannot fail)."""
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("latin-1")
+
+
 def load_config(path: Path, report: ValidationReport) -> AppConfig:
     """Read and parse config.yaml with user-readable failure messages."""
     if not path.exists():
@@ -53,7 +68,7 @@ def load_config(path: Path, report: ValidationReport) -> AppConfig:
             "It should sit next to RateComps.py." % path
         )
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = yaml.safe_load(_decode_config_text(path.read_bytes()))
     except yaml.YAMLError as exc:
         raise ConfigError(
             "config.yaml could not be read (YAML syntax problem):\n  %s\n"
@@ -67,28 +82,101 @@ def load_config(path: Path, report: ValidationReport) -> AppConfig:
 # --------------------------------------------------------------------------
 
 
-def _read_csv_text(path: Path) -> pd.DataFrame:
-    """Read a CSV as strings, tolerating Excel BOMs and legacy encodings."""
-    try:
-        return pd.read_csv(
-            path, dtype=str, encoding="utf-8-sig", keep_default_na=False,
-            skip_blank_lines=True, on_bad_lines="skip",
-        )
-    except UnicodeDecodeError:
-        return pd.read_csv(
-            path, dtype=str, encoding="latin-1", keep_default_na=False,
-            skip_blank_lines=True, on_bad_lines="skip",
-        )
+@dataclass
+class _CsvText:
+    """One CSV parsed to strings, with full accounting of malformed rows."""
+
+    header: List[str]
+    rows: List[List[str]]  #: every row padded/kept at exactly len(header)
+    n_extra: int = 0  #: rows skipped: more (non-blank) fields than the header
+    extra_lines: List[int] = field(default_factory=list)  #: 1-based examples
+    n_short: int = 0  #: rows padded: fewer fields than the header
+
+
+def _read_csv_text(path: Path) -> _CsvText:
+    """Read a CSV as strings, tolerating Excel BOMs and legacy encodings.
+
+    No row is ever dropped silently: rows with *extra* non-blank fields are
+    skipped and counted (values would not line up with the headers); rows
+    with *missing* fields are padded with blanks and counted. Purely blank
+    trailing fields (Excel's trailing commas) are trimmed without complaint.
+    """
+    data = path.read_bytes()
+    text = None
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = data.decode("latin-1")  # cannot fail; last-resort net
+
+    reader = csv.reader(io.StringIO(text))
+    header: Optional[List[str]] = None
+    parsed = _CsvText(header=[], rows=[])
+    for row in reader:
+        if not row or (len(row) == 1 and not row[0].strip()):
+            continue  # blank line
+        if header is None:
+            header = [str(c) for c in row]
+            parsed.header = header
+            continue
+        n = len(header)
+        if len(row) > n:
+            extras = row[n:]
+            if any(cell.strip() for cell in extras):
+                parsed.n_extra += 1
+                if len(parsed.extra_lines) < 3:
+                    parsed.extra_lines.append(reader.line_num)
+                continue  # cannot know which columns the values belong to
+            row = row[:n]  # trailing commas only - nothing was lost
+        elif len(row) < n:
+            parsed.n_short += 1
+            row = row + [""] * (n - len(row))
+        parsed.rows.append(row)
+
+    if header is None:
+        raise ValueError("the file is empty")
+    return parsed
+
+
+_RE_THOUSANDS = re.compile(r"^-?\d{1,3}(?:,\d{3})+(?:\.\d+)?$")
+_RE_DECIMAL_COMMA = re.compile(r"^-?\d+,\d{1,2}$")
 
 
 def _parse_number(token: str) -> Optional[float]:
-    s = token.strip().replace(",", "").replace("%", "")
+    s = token.strip().replace("%", "")
     if not s:
         return None
+    if "," in s:
+        # Distinguish 1,234.5 (thousands groups of three) from the European
+        # decimal comma 3,64. Anything else with a comma is ambiguous and is
+        # treated as non-numeric (counted + reported upstream) rather than
+        # guessed at - "3,64" naively stripped would become 364.
+        if _RE_THOUSANDS.match(s):
+            s = s.replace(",", "")
+        elif _RE_DECIMAL_COMMA.match(s):
+            s = s.replace(",", ".")
+        else:
+            return None
     try:
-        return float(s)
+        value = float(s)
     except ValueError:
         return None
+    # "nan"/"inf" parse as floats but would poison the JSON payload; treat
+    # them like any other non-numeric token (counted + reported upstream).
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _interior_gap_count(values: List[Optional[float]]) -> int:
+    """Count null months strictly between the first and last non-null value."""
+    non_null = [i for i, v in enumerate(values) if v is not None]
+    if len(non_null) < 2:
+        return 0
+    return sum(1 for i in range(non_null[0] + 1, non_null[-1]) if values[i] is None)
 
 
 def read_table(path: Path, report: ValidationReport) -> Optional[SourceTable]:
@@ -96,19 +184,34 @@ def read_table(path: Path, report: ValidationReport) -> Optional[SourceTable]:
     error in the report) when the file is unusable."""
     source = path.name
     try:
-        df = _read_csv_text(path)
-    except Exception as exc:  # pandas raises several parser/IO error types
+        parsed = _read_csv_text(path)
+    except Exception as exc:  # decode/IO/csv errors
         report.error(source, "File skipped - could not be read as a CSV (%s)." % exc)
         return None
 
-    if df.shape[1] < 2:
+    if parsed.n_extra:
+        examples = ", ".join(str(n) for n in parsed.extra_lines)
+        report.warning(
+            source,
+            "%d row(s) skipped - more fields than the header row, so the values "
+            "would not line up with the columns (line %s). Check for stray commas."
+            % (parsed.n_extra, examples),
+        )
+    if parsed.n_short:
+        report.warning(
+            source,
+            "%d row(s) had fewer fields than the header row; the missing cells "
+            "were treated as blanks." % parsed.n_short,
+        )
+
+    if len(parsed.header) < 2:
         report.error(
             source,
             "File skipped - expected a 'date' column plus at least one rate column.",
         )
         return None
 
-    columns = [str(c) for c in df.columns]
+    columns = parsed.header
     date_header = columns[0]
     if normalize_rate_key(date_header) != "date":
         report.warning(
@@ -120,8 +223,9 @@ def read_table(path: Path, report: ValidationReport) -> Optional[SourceTable]:
     # Map rate columns to canonical keys, keeping the first occurrence of dupes.
     rate_keys: List[str] = []
     original_headers: Dict[str, str] = {}
-    col_for_key: Dict[str, str] = {}
-    for header in columns[1:]:
+    col_for_key: Dict[str, int] = {}
+    header_for_key: Dict[str, str] = {}
+    for index, header in enumerate(columns[1:], start=1):
         key = normalize_rate_key(header)
         if not key:
             report.warning(source, "A rate column has an empty header; column ignored.")
@@ -130,10 +234,11 @@ def read_table(path: Path, report: ValidationReport) -> Optional[SourceTable]:
             report.warning(
                 source,
                 "Columns %r and %r are the same rate after normalization; keeping %r."
-                % (col_for_key[key], header, col_for_key[key]),
+                % (header_for_key[key], header, header_for_key[key]),
             )
             continue
-        col_for_key[key] = header
+        col_for_key[key] = index
+        header_for_key[key] = header
         original_headers[key] = header.strip()
         rate_keys.append(key)
 
@@ -146,8 +251,8 @@ def read_table(path: Path, report: ValidationReport) -> Optional[SourceTable]:
     bad_dates: List[str] = []
     bad_numbers: Dict[str, int] = {}
     duplicate_months: List[str] = []
-    for _, row in df.iterrows():
-        token = str(row.iloc[0])
+    for row in parsed.rows:
+        token = row[0]
         date = parse_date_to_month_end(token)
         if date is None:
             if token.strip():
@@ -155,7 +260,7 @@ def read_table(path: Path, report: ValidationReport) -> Optional[SourceTable]:
             continue
         values: Dict[str, Optional[float]] = {}
         for key in rate_keys:
-            raw_value = str(row[col_for_key[key]])
+            raw_value = row[col_for_key[key]]
             value = _parse_number(raw_value)
             if value is None and raw_value.strip():
                 bad_numbers[key] = bad_numbers.get(key, 0) + 1
@@ -200,6 +305,14 @@ def read_table(path: Path, report: ValidationReport) -> Optional[SourceTable]:
         )
         if series.has_data():
             table.series[key] = series
+            gaps = _interior_gap_count(series.values)
+            if gaps:
+                report.info(
+                    source,
+                    "Column '%s': %d month(s) inside the series have no value; "
+                    "the chart line bridges the gap (Excel export leaves them blank)."
+                    % (key, gaps),
+                )
         else:
             report.info(source, "Column '%s' has no values in this file; ignored." % key)
             table.original_headers.pop(key, None)
@@ -405,7 +518,21 @@ def _resolve_cutoff(config: AppConfig, actuals: SourceTable, report: ValidationR
                 % (config.cutoff_date, fmt_month(last_actual)),
             )
             return last_actual, True
-        return iso(parsed), False
+        cutoff_iso = iso(parsed)
+        if actuals.date_min is not None and (
+            cutoff_iso < actuals.date_min or cutoff_iso > last_actual
+        ):
+            report.warning(
+                "config",
+                "cutoff_date %s is outside the actuals range (%s to %s); charts "
+                "may show no history or hide every forecast."
+                % (
+                    fmt_month(cutoff_iso),
+                    fmt_month(actuals.date_min),
+                    fmt_month(last_actual),
+                ),
+            )
+        return cutoff_iso, False
     return last_actual, True
 
 
@@ -417,7 +544,20 @@ def load_dashboard(
 ) -> Dashboard:
     """Discover, parse and assemble everything the dashboard needs."""
     folder = _resolve_data_folder(config, config_dir, data_folder_override)
-    csv_files = sorted(folder.glob("*.csv"), key=lambda p: p.name.lower())
+    # iterdir + lower(): ".CSV" must load on macOS/Linux too (glob is only
+    # case-insensitive on Windows). Excel owner/lock files (~$x.csv) and
+    # hidden files are not data.
+    csv_files = sorted(
+        (
+            p
+            for p in folder.iterdir()
+            if p.is_file()
+            and p.suffix.lower() == ".csv"
+            and not p.name.startswith("~$")
+            and not p.name.startswith(".")
+        ),
+        key=lambda p: p.name.lower(),
+    )
     report.info("folder", "%s - %d CSV file(s) found." % (folder, len(csv_files)))
 
     actuals_path = _find_actuals(folder, csv_files)

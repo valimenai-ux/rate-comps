@@ -52,7 +52,14 @@ def month_end(year: int, month: int) -> dt.date:
 
 
 def _expand_year(y: int) -> int:
-    return y + 2000 if y < 100 else y
+    """Excel's two-digit-year rule: 00-29 -> 2000s, 30-99 -> 1900s.
+
+    Without the pivot, a legacy row like '10/31/99' would become 2099 and
+    silently drag the auto-cutoff (last actuals month) seventy years out.
+    """
+    if y >= 100:
+        return y
+    return y + 2000 if y < 30 else y + 1900
 
 
 def parse_date_to_month_end(token: str) -> Optional[dt.date]:
@@ -182,6 +189,43 @@ def _as_float(value: Any, default: float) -> float:
         return default
 
 
+def _as_opt_float(value: Any, key: str, report: ValidationReport) -> Optional[float]:
+    """Float or None - never a silent default (warn-on-degrade contract)."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        report.warning("config", "%s value %r is not a number; ignored." % (key, value))
+        return None
+
+
+_TRUE_STRINGS = {"true", "yes", "on", "1"}
+_FALSE_STRINGS = {"false", "no", "off", "0"}
+
+
+def _as_bool(value: Any, default: bool, key: str, report: ValidationReport) -> bool:
+    """Tolerant boolean: YAML gives real bools, but quoted strings like
+    "false" must not silently coerce to True (bool("false") is True)."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in _TRUE_STRINGS:
+            return True
+        if s in _FALSE_STRINGS:
+            return False
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    report.warning(
+        "config",
+        "%s value %r is not true/false; using %s." % (key, value, default),
+    )
+    return default
+
+
 def _parse_forecast_entry(raw: Any, index: int, report: ValidationReport) -> Optional[ForecastEntry]:
     if not isinstance(raw, dict) or "file" not in raw:
         report.warning(
@@ -202,7 +246,7 @@ def _parse_forecast_entry(raw: Any, index: int, report: ValidationReport) -> Opt
                 "forecasts[%d] color %r is not a #RRGGBB value; using an automatic color."
                 % (index, color),
             )
-    entry.enabled = bool(raw.get("enabled", True))
+    entry.enabled = _as_bool(raw.get("enabled"), True, "forecasts[%d].enabled" % index, report)
     dash = str(raw.get("dash", "solid")).strip().lower()
     if dash not in _DASH_VALUES:
         report.warning(
@@ -245,7 +289,7 @@ def _parse_y_axis(raw: Any, report: ValidationReport) -> YAxisConfig:
     if not isinstance(raw, dict):
         report.warning("config", "'y_axis' must be a mapping; using defaults.")
         return y
-    y.show = bool(raw.get("show", False))
+    y.show = _as_bool(raw.get("show"), False, "y_axis.show", report)
     y.default_padding_pct = _as_float(raw.get("default_padding_pct"), 8.0)
     per_rate = raw.get("per_rate")
     if isinstance(per_rate, dict):
@@ -255,13 +299,12 @@ def _parse_y_axis(raw: Any, report: ValidationReport) -> YAxisConfig:
                 report.warning("config", "y_axis.per_rate.%s must be a mapping; ignored." % key)
                 continue
             axis = RateAxis()
-            axis.auto = bool(spec.get("auto", True))
-            if spec.get("min") is not None:
-                axis.min = _as_float(spec.get("min"), 0.0)
-            if spec.get("max") is not None:
-                axis.max = _as_float(spec.get("max"), 0.0)
-            if spec.get("padding_pct") is not None:
-                axis.padding_pct = _as_float(spec.get("padding_pct"), y.default_padding_pct)
+            axis.auto = _as_bool(spec.get("auto"), True, "y_axis.per_rate.%s.auto" % key, report)
+            axis.min = _as_opt_float(spec.get("min"), "y_axis.per_rate.%s.min" % key, report)
+            axis.max = _as_opt_float(spec.get("max"), "y_axis.per_rate.%s.max" % key, report)
+            axis.padding_pct = _as_opt_float(
+                spec.get("padding_pct"), "y_axis.per_rate.%s.padding_pct" % key, report
+            )
             y.per_rate[key] = axis
     elif per_rate is not None:
         report.warning("config", "y_axis.per_rate must be a mapping; ignored.")
@@ -367,7 +410,9 @@ def parse_config(raw: Any, report: ValidationReport) -> AppConfig:
             config.label_dates.append(iso(parsed))
     config.label_dates = sorted(set(config.label_dates))
 
-    config.always_label_line_ends = bool(raw.get("always_label_line_ends", True))
+    config.always_label_line_ends = _as_bool(
+        raw.get("always_label_line_ends"), True, "always_label_line_ends", report
+    )
 
     names = raw.get("rate_display_names")
     if isinstance(names, dict):

@@ -4,7 +4,12 @@
 # over this one to persist whatever you configured in the browser.
 
 # Folder containing actuals.csv plus one CSV per forecast (filename = forecast name).
-# Production note: point this at the shared drive, e.g. C:\Treasury\RateComps_Data
+# Production note: point this at the shared drive. Write Windows paths plain
+# or in 'single quotes' - NOT in "double quotes" (there, \T \R etc. are read
+# as escape codes and the file fails to load):
+#   data_folder: C:\Treasury\RateComps_Data      <- fine
+#   data_folder: 'C:\Treasury\RateComps_Data'    <- fine
+#   data_folder: "C:\Treasury\RateComps_Data"    <- BREAKS
 data_folder: /Users/valimenai/Documents/RateComps_Data
 
 # Where the generated dashboard is written (relative paths resolve against this repo).

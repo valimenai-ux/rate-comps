@@ -45,6 +45,22 @@ def test_month_end_boundaries() -> None:
 
 
 @pytest.mark.parametrize(
+    ("token", "expected_year"),
+    [
+        ("Oct-25", 2025),
+        ("Feb-29", 2029),  # last year of the 2000s window
+        ("Oct-30", 1930),  # Excel pivot: 30-99 -> 1900s
+        ("10/31/99", 1999),  # legacy row must not drag the cutoff to 2099
+        ("10/31/2099", 2099),  # four digits are always taken literally
+    ],
+)
+def test_two_digit_year_pivot(token: str, expected_year: int) -> None:
+    parsed = parse_date_to_month_end(token)
+    assert parsed is not None
+    assert parsed.year == expected_year
+
+
+@pytest.mark.parametrize(
     ("raw", "expected"),
     [
         ("fed_funds", "fed_funds"),
