@@ -459,6 +459,17 @@ and the remainder triaged by hand. Everything below cites the pre-fix tree.
   clean error output.
 - `tests/js/yaml_harness.js`, `tests/js/excel_harness.js` (new).
 
+**Post-audit addition (field report from the first corporate install)**
+- The first run on the target laptop failed with `[SSL:
+  CERTIFICATE_VERIFY_FAILED] self signed certificate in certificate chain`
+  — corporate TLS inspection, exactly the case the pip-failure message
+  anticipated. `RateComps.py` now recognizes that specific failure in pip's
+  output and automatically retries the one-time download with
+  `--trusted-host pypi.org --trusted-host files.pythonhosted.org`,
+  announcing what it is doing and why. Verification stays fully on for
+  every other network and every other failure mode (unit-tested in
+  `tests/test_bootstrap_helpers.py`).
+
 **Docs**
 - `config.yaml` — Windows-path quoting guidance with the three spellings.
 - `README.md` — freeze panes + export scope; malformed-row and gap policy;

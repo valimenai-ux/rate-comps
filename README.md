@@ -199,11 +199,16 @@ that `RateComps.py` creates, or `pip install -r requirements.txt`.
 
 ## Troubleshooting
 
-- **"The charting libraries could not be downloaded"** — the corporate
-  network is blocking pypi.org. Connect the VPN and retry; or set the proxy
-  (`set HTTPS_PROXY=http://proxy.company.com:8080` on Windows,
-  `export HTTPS_PROXY=...` on macOS) and retry; or send the message to IT.
-  This download happens once — viewing the dashboard needs no internet at all.
+- **"The charting libraries could not be installed"** — read the pip lines
+  above the message. If they mention *certificates / SSL*, the corporate
+  network re-signs secure traffic; the tool detects this and automatically
+  retries once with certificate checks relaxed **for pypi.org only** (it
+  says so when it happens). If it still fails, the network is blocking
+  pypi.org outright: connect the VPN and retry; or set the proxy
+  (PowerShell: `$env:HTTPS_PROXY = 'http://proxy.company.com:8080'`,
+  cmd: `set HTTPS_PROXY=...`, macOS: `export HTTPS_PROXY=...`) and retry;
+  or send the whole message to IT. This download happens once — viewing
+  the dashboard needs no internet at all.
 - **"This tool needs Python 3.9 or newer"** — install a newer Python, then
   re-run. (Corporate laptops on Python 3.9 are fully supported.)
 - **Setup seems corrupted** — delete the `.venv` folder next to

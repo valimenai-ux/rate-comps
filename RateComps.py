@@ -19,7 +19,7 @@ import subprocess
 import sys
 import traceback
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 MIN_PYTHON = (3, 9)
 ROOT = Path(__file__).resolve().parent
@@ -185,17 +185,62 @@ def ensure_pip() -> None:
         )
 
 
-def pip_install(requirements: Path) -> int:
-    command = [
-        str(venv_python()),
-        "-m",
-        "pip",
-        "install",
-        "--disable-pip-version-check",
-        "-r",
-        str(requirements),
-    ]
-    return subprocess.run(command).returncode
+#: Relaxing certificate checks is limited to exactly these two hosts, and
+#: only ever happens as an announced retry after a verification failure.
+TRUSTED_HOST_ARGS = [
+    "--trusted-host",
+    "pypi.org",
+    "--trusted-host",
+    "files.pythonhosted.org",
+]
+
+
+def pip_install(requirements: Path, extra_args: Optional[List[str]] = None) -> Tuple[int, str]:
+    command = (
+        [
+            str(venv_python()),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+        ]
+        + list(extra_args or [])
+        + ["-r", str(requirements)]
+    )
+    # Output is captured so a certificate-interception failure can be
+    # recognized and retried; everything pip said is echoed either way.
+    result = subprocess.run(command, capture_output=True, text=True)
+    output = "%s\n%s" % (result.stdout or "", result.stderr or "")
+    say(output.strip())
+    return result.returncode, output
+
+
+def _looks_like_ssl_interception(pip_output: str) -> bool:
+    """True when pip failed because the network re-signs TLS traffic with a
+    corporate certificate that Python's own certificate list doesn't know."""
+    text = pip_output.lower()
+    return (
+        "certificate verify failed" in text
+        or "certificate_verify_failed" in text
+        or "ssl: certificate" in text
+    )
+
+
+def install_requirements(requirements: Path) -> int:
+    """pip install with full verification; on a corporate TLS-inspection
+    failure, retry once trusting pypi.org directly (announced, one-time)."""
+    say("  (downloading - pip's messages appear when it finishes)")
+    returncode, output = pip_install(requirements)
+    if returncode == 0 or not _looks_like_ssl_interception(output):
+        return returncode
+    say("")
+    say("The download failed on a certificate check. This usually means the")
+    say("corporate network inspects secure traffic and re-signs it with a")
+    say("company certificate that Python does not know about. Retrying this")
+    say("one-time download with certificate checks relaxed for pypi.org only...")
+    say("")
+    returncode, _ = pip_install(requirements, TRUSTED_HOST_ARGS)
+    return returncode
 
 
 def ensure_environment() -> None:
@@ -214,14 +259,14 @@ def ensure_environment() -> None:
     ensure_pip()
     say("Downloading the charting libraries (plotly, jinja2, ...)")
     say("This needs internet access once; later runs work fully offline.")
-    returncode = pip_install(requirements)
+    returncode = install_requirements(requirements)
     if returncode != 0 and requirements == REQUIREMENTS_LOCK:
         say("")
         say("The pinned library set could not be installed on this machine;")
         say("trying the flexible version ranges instead...")
         requirements = REQUIREMENTS
         fingerprint = requirements_fingerprint(requirements)
-        returncode = pip_install(requirements)
+        returncode = install_requirements(requirements)
     if returncode != 0:
         fail(
             "The charting libraries could not be installed",
@@ -235,9 +280,9 @@ def ensure_environment() -> None:
             "        Windows PowerShell:  $env:HTTPS_PROXY = 'http://proxy.company.com:8080'",
             "        Windows cmd:         set HTTPS_PROXY=http://proxy.company.com:8080",
             "        macOS:               export HTTPS_PROXY=http://proxy.company.com:8080",
-            "  3. If the pip messages mention certificates or SSL, your",
-            "     network inspects secure traffic - forward this whole",
-            "     message (and the pip output) to IT.",
+            "  3. If the pip messages still mention certificates or SSL (the",
+            "     tool already retried once with relaxed checks for pypi.org),",
+            "     forward this whole message and the pip output to IT.",
             "  4. Otherwise ask IT to allow access to pypi.org from Python/pip.",
         )
     try:
