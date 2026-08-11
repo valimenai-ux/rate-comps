@@ -1,0 +1,74 @@
+# Rate Comps - configuration
+# Edit values here, then run RateComps.py again. You can also click
+# "Download config.yaml" inside the dashboard and drop the downloaded file
+# over this one to persist whatever you configured in the browser.
+
+# Folder containing actuals.csv plus one CSV per forecast (filename = forecast name).
+# Production note: point this at the shared drive, e.g. C:\Treasury\RateComps_Data
+data_folder: /Users/valimenai/Documents/RateComps_Data
+
+# Where the generated dashboard is written (relative paths resolve against this repo).
+output_path: output/dashboard.html
+
+# Boundary between actual history and forecast. null = last date found in
+# actuals.csv (currently resolves to 2026-06-30).
+# Accepts YYYY-MM-DD, M/D/YYYY, or Mon-YY.
+cutoff_date: null
+
+# The forecast that continues the thick primary line past the cutoff (dashed).
+# Matches a display_name or a file name (with or without .csv).
+primary_forecast: "9+3 Forecast"
+
+# Draw + legend order, top to bottom. Optional per-forecast key:
+#   dash: solid | dash | dot   (line style; defaults to solid)
+forecasts:
+  - {file: "FY26 Plan 10-16.csv", display_name: "FY26 Plan (10/16)", color: "#BFBFBF", enabled: true}
+  - {file: "8+4 Forecast.csv",    display_name: "8+4 Forecast",      color: "#8FAADC", enabled: true}
+  - {file: "9+3 Forecast.csv",    display_name: "9+3 Forecast",      color: "#2F5597", enabled: true}
+  - {file: "June 5YO Rates.csv",  display_name: "June 5YO",          color: "#FFC000", enabled: true, dash: dash}
+# Reserved colors for forecast slots 5-6 (applied automatically to any CSV
+# found in data_folder that is not listed above): "#2E8B8B", "#7A5FA8"
+
+# Months that get a marker + value label on every series that has data there.
+label_dates: ["2026-07-31", "2026-10-31", "2027-10-31"]
+
+# Also label the final point of every line.
+always_label_line_ends: true
+
+# Chart titles per rate. Keys are normalized column names (lowercase,
+# spaces -> underscores). Rates found in the CSVs but not listed here fall
+# back to their column header.
+rate_display_names:
+  fed_funds: "Fed Funds Effective"
+  sofr: "SOFR O/N"
+  ust_10yr: "10YR UST"
+
+# Optional: reorder charts (list of rate keys; unlisted rates keep the
+# discovered order: actuals.csv column order, then extras).
+rate_order: []
+# Optional: hide rates entirely (list of rate keys).
+hidden_rates: []
+
+# X-axis ticks: with anchor_month 10 and interval 3 you get fiscal quarters
+# Oct / Jan / Apr / Jul, formatted like "Oct-25".
+tick:
+  anchor_month: 10
+  interval_months: 3
+
+# Y-axis. House style hides the axis (toggle it back on in the dashboard).
+# Per-rate overrides, e.g.:
+#   fed_funds: {auto: false, min: 2.5, max: 5.0, padding_pct: 8}
+y_axis:
+  show: false
+  default_padding_pct: 8
+  per_rate: {}
+
+chart:
+  width_px: 1000
+  height_px: 480
+  font_family: "Aptos Narrow, Aptos, Calibri, Segoe UI, Arial, sans-serif"
+  font_sizes: {title: 18, legend: 12, axis: 12, label: 11, caption: 11}
+
+export:
+  png_scale: 3          # multiplier applied on download (~300 dpi)
+  default_format: png   # png | svg (used by "Export all charts")

@@ -1,0 +1,7 @@
+# Developer tooling (not needed by teammates who only run RateComps.py).
+-r requirements.txt
+pytest>=7.4
+mypy>=1.8,<1.19  # newer mypy cannot target python_version 3.9
+types-PyYAML>=6.0
+# (no pandas-stubs: its numpy stubs need 3.12+ syntax, incompatible with the
+#  3.9-target check; pandas is treated as untyped in pyproject.toml)

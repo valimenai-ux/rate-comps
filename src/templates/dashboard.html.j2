@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} &mdash; {{ generated_at }}</title>
+<style>{{ css }}</style>
+</head>
+<body>
+<script id="rc-payload" type="application/json">{{ payload_json }}</script>
+<div id="rc-app">
+  <aside id="rc-sidebar">
+    <div class="rc-sidebar-head">
+      <h1>Rate Comps</h1>
+      <span id="rc-dirty" class="rc-dirty" hidden
+            title="Unsaved changes &mdash; use &quot;Download config.yaml&quot; to keep them">&#9679; unsaved</span>
+    </div>
+    <div class="rc-meta" id="rc-meta"></div>
+    <div class="rc-actions">
+      <button id="rc-download-config" class="rc-btn rc-btn-primary" type="button">Download config.yaml</button>
+      <button id="rc-restore-session" class="rc-btn" type="button" hidden>Restore last session</button>
+      <button id="rc-reset" class="rc-btn" type="button">Reset to file config</button>
+    </div>
+    <div id="rc-controls"></div>
+  </aside>
+  <main id="rc-main">
+    <div class="rc-toolbar">
+      <div class="rc-toolbar-left">
+        <button id="rc-sidebar-toggle" class="rc-btn" type="button" title="Show or hide the settings panel">Settings</button>
+        <span class="rc-headline">Rate forecast comparison</span>
+      </div>
+      <div class="rc-toolbar-actions">
+        <button id="rc-validation-toggle" class="rc-btn" type="button">Validation <span id="rc-validation-badge" class="rc-badge" hidden></span></button>
+        <button id="rc-export-all" class="rc-btn" type="button">Export all charts</button>
+        <button id="rc-export-excel" class="rc-btn rc-btn-primary" type="button">Export data to Excel</button>
+      </div>
+    </div>
+    <section id="rc-validation" hidden></section>
+    <div id="rc-charts"></div>
+  </main>
+</div>
+<noscript><p class="rc-noscript">This dashboard needs JavaScript. Open it in Microsoft Edge or Google Chrome.</p></noscript>
+<script>{{ plotly_js }}</script>
+<script>{{ xlsx_js }}</script>
+<script>{{ labels_js }}</script>
+<script>{{ charts_js }}</script>
+<script>{{ exports_js }}</script>
+<script>{{ app_js }}</script>
+</body>
+</html>

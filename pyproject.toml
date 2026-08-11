@@ -1,0 +1,20 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.9"
+files = ["src", "run.py", "RateComps.py"]
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["plotly.*"]
+ignore_missing_imports = true
+
+# pandas-stubs pulls in numpy stubs that use 3.12+ `type` statements, which
+# breaks checking at python_version 3.9 - so pandas is treated as untyped.
+[[tool.mypy.overrides]]
+module = ["pandas.*", "numpy.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
